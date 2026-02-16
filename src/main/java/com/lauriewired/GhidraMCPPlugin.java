@@ -3,6 +3,7 @@ package com.lauriewired;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressFactory;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
@@ -369,6 +370,16 @@ public class GhidraMCPPlugin extends Plugin {
             String address = qparams.get("address");
             int length = parseIntOrDefault(qparams.get("length"), 8);
             sendResponse(exchange, readMemory(address, length));
+        });
+
+        server.createContext("/search_memory_value", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String valueHex = qparams.get("value");
+            int valueSize = parseIntOrDefault(qparams.get("size"), 8);
+            int maxResults = parseIntOrDefault(qparams.get("max_results"), 100);
+            String startStr = qparams.get("start");
+            String endStr = qparams.get("end");
+            sendResponse(exchange, searchMemoryForValue(valueHex, valueSize, maxResults, startStr, endStr));
         });
 
         server.setExecutor(null);
@@ -1480,6 +1491,98 @@ public class GhidraMCPPlugin extends Plugin {
             return sb.toString();
         } catch (Exception e) {
             return "Error reading memory: " + e.getMessage();
+        }
+    }
+
+    /** Max bytes to scan in search_memory_value to avoid timeout (e.g. 50 MB). */
+    private static final int SEARCH_MEMORY_MAX_BYTES = 50 * 1024 * 1024;
+    private static final int SEARCH_CHUNK_SIZE = 65536;
+
+    /**
+     * Search memory for a 64-bit or 32-bit value (little-endian). Returns addresses where the value appears.
+     * @param valueHex hex string (e.g. "0xfffffe00088a7c5c" or "88a7c5c")
+     * @param valueSize 4 or 8
+     * @param maxResults stop after this many hits
+     * @param startStr optional start address to limit search
+     * @param endStr optional end address to limit search
+     */
+    private String searchMemoryForValue(String valueHex, int valueSize, int maxResults, String startStr, String endStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (valueHex == null || valueHex.isEmpty()) return "value (hex) is required";
+        if (valueSize != 4 && valueSize != 8) valueSize = 8;
+        if (maxResults <= 0 || maxResults > 1000) maxResults = 100;
+
+        try {
+            String clean = valueHex.trim().toLowerCase().replaceFirst("^0x", "");
+            long value;
+            if (clean.length() <= 16) {
+                value = Long.parseUnsignedLong(clean, 16);
+            } else {
+                return "Error: value too long (max 16 hex digits for 64-bit)";
+            }
+            if (valueSize == 4) value &= 0xFFFFFFFFL;
+            byte[] needle = new byte[valueSize];
+            for (int i = 0; i < valueSize; i++) {
+                needle[i] = (byte) (value >> (i * 8) & 0xff);
+            }
+
+            Memory memory = program.getMemory();
+            AddressFactory af = program.getAddressFactory();
+            List<String> results = new ArrayList<>();
+            int scanned = 0;
+            MemoryBlock[] blocks = memory.getBlocks();
+            Address rangeStart = null;
+            Address rangeEnd = null;
+            if (startStr != null && !startStr.isEmpty() && endStr != null && !endStr.isEmpty()) {
+                rangeStart = af.getAddress(startStr);
+                rangeEnd = af.getAddress(endStr);
+            }
+
+            for (MemoryBlock block : blocks) {
+                if (results.size() >= maxResults || scanned >= SEARCH_MEMORY_MAX_BYTES) break;
+                if (!block.isInitialized()) continue;
+                Address start = block.getStart();
+                Address end = block.getEnd();
+                if (rangeStart != null && rangeEnd != null) {
+                    if (start.compareTo(rangeEnd) > 0 || end.compareTo(rangeStart) < 0) continue;
+                    start = start.compareTo(rangeStart) < 0 ? rangeStart : start;
+                    end = end.compareTo(rangeEnd) > 0 ? rangeEnd : end;
+                }
+                if (start.getOffset() + valueSize > end.getOffset() + 1) continue;
+
+                byte[] buf = new byte[SEARCH_CHUNK_SIZE];
+                Address cur = start;
+                while (cur != null && cur.compareTo(end) <= 0 && results.size() < maxResults && scanned < SEARCH_MEMORY_MAX_BYTES) {
+                    int toRead = (int) Math.min(SEARCH_CHUNK_SIZE, end.getOffset() - cur.getOffset() + 1);
+                    if (toRead < valueSize) break;
+                    int n = memory.getBytes(cur, buf);
+                    for (int i = 0; i <= n - valueSize && results.size() < maxResults; i++) {
+                        boolean match = true;
+                        for (int j = 0; j < valueSize; j++) {
+                            if (buf[i + j] != needle[j]) { match = false; break; }
+                        }
+                        if (match) {
+                            try {
+                                Address hit = cur.add(i);
+                                results.add(hit.toString());
+                            } catch (Exception ignored) { }
+                        }
+                    }
+                    scanned += n;
+                    try {
+                        cur = cur.add(n);
+                        if (cur.compareTo(end) > 0) break;
+                    } catch (Exception e) {
+                        break;
+                    }
+                }
+            }
+            return results.isEmpty() ? "No matches" : String.join("\n", results);
+        } catch (NumberFormatException e) {
+            return "Error: value must be hex (e.g. 0xfffffe00088a7c5c)";
+        } catch (Exception e) {
+            return "Error searching memory: " + e.getMessage();
         }
     }
 

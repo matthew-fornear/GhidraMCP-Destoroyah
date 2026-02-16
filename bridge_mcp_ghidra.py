@@ -343,6 +343,40 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
     return safe_get("strings", params)
 
 @mcp.tool()
+def search_memory_for_value(
+    value: str,
+    value_size: int = 8,
+    max_results: int = 100,
+    start_address: str = None,
+    end_address: str = None,
+) -> list:
+    """
+    Search memory for a 64-bit or 32-bit value (little-endian). Returns addresses where the value appears.
+    Use to find where a function pointer or address is stored (e.g. handler table entries).
+
+    Args:
+        value: Hex value (e.g. "0xfffffe00088a7c5c" or "88a7c5c")
+        value_size: 4 or 8 bytes (default 8)
+        max_results: Stop after this many hits (default 100)
+        start_address: Optional start of range to search
+        end_address: Optional end of range to search
+
+    Returns:
+        List of addresses (hex strings) where the value was found, or ["No matches"]
+    """
+    params = {"value": value, "size": value_size, "max_results": max_results}
+    if start_address:
+        params["start"] = start_address
+    if end_address:
+        params["end"] = end_address
+    lines = safe_get("search_memory_value", params)
+    if not lines or (len(lines) == 1 and lines[0].startswith("Error")):
+        return lines or ["Error: no response"]
+    if len(lines) == 1 and lines[0] == "No matches":
+        return ["No matches"]
+    return lines
+
+@mcp.tool()
 def read_memory(address: str, length: int = 8) -> str:
     """
     Read raw bytes at address. Returns hex string (little-endian).
