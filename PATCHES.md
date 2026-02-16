@@ -6,5 +6,7 @@
 - **Timeout:** Default 60s; `GHIDRA_MCP_TIMEOUT` env. Stops timeouts on decompile/list_data for large binaries.
 - **get_xrefs_to_range(start, end):** Plugin + bridge. Xrefs to any address in [start,end] (step 8). For vtables/data blocks with no direct ref to exact addr.
 - **read_memory(address, length) / get_pointer_at(address):** Plugin `/read_memory` + bridge. Read raw bytes (hex) or one 64-bit pointer (LE). For vtable slots and data layout without UI.
+- **ref_type filter:** `get_xrefs_to` and `get_xrefs_to_range` accept optional `ref_type`: `WRITE`, `READ`, or `DATA`. Enables finding writers to an address (e.g. WRITE xrefs to a global), or data-only refs. Plugin + bridge.
+- **list_functions_data_only_xrefs:** Plugin `/functions_data_only_xrefs` + bridge tool. Returns functions that have at least one reference and zero code (call/flow) references — useful to find vtable slot targets. May be slow on very large programs.
 
 Build: copy Ghidra JARs to `lib/`, then `mvn clean package assembly:single`. Install zip from `target/` in Ghidra. Run `python bridge_mcp_ghidra.py` for MCP server.

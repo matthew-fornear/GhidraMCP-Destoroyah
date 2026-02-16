@@ -42,6 +42,16 @@
   Why: Resolving OOL vtable slots (+0x100, +0x108, +0x110) and checking data layout requires reading at an address.  
   Patch: Plugin endpoint `/read_memory?address=&length=` (max 128 bytes, returns hex). Bridge tools `read_memory(address, length)` and `get_pointer_at(address)` (8 bytes, little-endian, returns hex address).
 
+- **ref_type filter on xrefs**  
+  Before: No way to restrict xrefs by access type (read vs write).  
+  Why: Finding writers to a global (e.g. who sets a BSS table) or only data refs (vtable slots) requires filtering by reference type.  
+  Patch: Plugin `getXrefsTo` and `getXrefsToRange` accept optional query param `ref_type`: `WRITE`, `READ`, or `DATA`. Bridge tools `get_xrefs_to` and `get_xrefs_to_range` accept `ref_type`. Use `ref_type="WRITE"` to find code that writes to an address; `ref_type="DATA"` for non-call/flow refs only.
+
+- **list_functions_data_only_xrefs**  
+  Before: No way to list functions that are only referenced from data (e.g. vtable targets).  
+  Why: Auditing OOL handlers or vtables requires finding functions with no code (call/flow) refs—only data refs.  
+  Patch: New plugin endpoint `/functions_data_only_xrefs` and bridge tool `list_functions_data_only_xrefs(offset, limit)`. Returns "functionName at address" for each function that has at least one reference and zero call/flow references. May be slow on very large programs.
+
 ---
 
 GhidraMCP is an MCP server plus a Ghidra plugin. An MCP client (e.g. Cursor) can drive Ghidra: decompile, rename, list methods/classes/imports/exports, xrefs, and more.
@@ -54,9 +64,11 @@ GhidraMCP is an MCP server plus a Ghidra plugin. An MCP client (e.g. Cursor) can
 3. In Ghidra: File → Install Extensions → + → choose the zip from `target/` → restart. Turn the plugin on in File → Configure → Developer. To change the HTTP port: Edit → Tool Options → GhidraMCP HTTP Server.
 
 **Bridge (MCP server)**  
-Run `python bridge_mcp_ghidra.py`. It talks to Ghidra at `http://127.0.0.1:8080/` by default. To use another host or port, pass `--ghidra-server` or set it in your MCP config. To change how long the bridge waits for Ghidra, set `GHIDRA_MCP_TIMEOUT` in the environment (seconds; default 600).
+Run `python bridge_mcp_ghidra.py`. It talks to Ghidra at `http://127.0.0.1:8080/` by default. To use another host or port, pass `--ghidra-server` or set it in your MCP config. To change how long the bridge waits for Ghidra, set `GHIDRA_MCP_TIMEOUT` in the environment (seconds; default 600). Exposed tools include `get_xrefs_to`, `get_xrefs_to_range` (with optional `ref_type`: WRITE, READ, DATA), and `list_functions_data_only_xrefs` for vtable-style discovery.
 
 **Cursor**  
 In MCP settings, set the command to `python` and the args to the path to `bridge_mcp_ghidra.py` and `--ghidra-server` and your Ghidra URL (e.g. `http://127.0.0.1:8080/`).
 
 **Build from source:** Java 11+ and Maven. The JARs in `lib/` are not in the repo; copy them from your Ghidra install as above.
+
+**Testing the new xref/search patch:** With a program loaded in Ghidra and the updated plugin installed, from an MCP client call `get_xrefs_to("<addr>", ref_type="WRITE")` to find writers to an address (e.g. a BSS symbol). Call `get_xrefs_to("<addr>", ref_type="READ")` to restrict to readers. Call `list_functions_data_only_xrefs(limit=20)` to list functions that are only referenced from data (e.g. vtable slot targets). Rebuild the plugin (`mvn clean package assembly:single`) and reinstall in Ghidra so the new endpoints are available.

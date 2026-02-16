@@ -317,7 +317,8 @@ public class GhidraMCPPlugin extends Plugin {
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
             boolean codeOnly = "true".equalsIgnoreCase(qparams.get("code_only"));
-            sendResponse(exchange, getXrefsTo(address, offset, limit, codeOnly));
+            String refTypeFilter = qparams.get("ref_type");
+            sendResponse(exchange, getXrefsTo(address, offset, limit, codeOnly, refTypeFilter));
         });
 
         server.createContext("/xrefs_to_range", exchange -> {
@@ -327,7 +328,8 @@ public class GhidraMCPPlugin extends Plugin {
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
             boolean codeOnly = "true".equalsIgnoreCase(qparams.get("code_only"));
-            sendResponse(exchange, getXrefsToRange(startAddr, endAddr, offset, limit, codeOnly));
+            String refTypeFilter = qparams.get("ref_type");
+            sendResponse(exchange, getXrefsToRange(startAddr, endAddr, offset, limit, codeOnly, refTypeFilter));
         });
 
         server.createContext("/xrefs_from", exchange -> {
@@ -353,6 +355,13 @@ public class GhidraMCPPlugin extends Plugin {
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
             String filter = qparams.get("filter");
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
+        });
+
+        server.createContext("/functions_data_only_xrefs", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, getFunctionsWithDataOnlyXrefs(offset, limit));
         });
 
         server.createContext("/read_memory", exchange -> {
@@ -1265,8 +1274,9 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * Get all references to a specific address (xref to).
      * @param codeOnly when true, only return references that are calls or flow (e.g. BL call sites)
+     * @param refTypeFilter optional "WRITE", "READ", or "DATA" to filter by ref type; null/empty = all
      */
-    private String getXrefsTo(String addressStr, int offset, int limit, boolean codeOnly) {
+    private String getXrefsTo(String addressStr, int offset, int limit, boolean codeOnly, String refTypeFilter) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (addressStr == null || addressStr.isEmpty()) return "Address is required";
@@ -1274,14 +1284,16 @@ public class GhidraMCPPlugin extends Plugin {
         try {
             Address addr = program.getAddressFactory().getAddress(addressStr);
             ReferenceManager refManager = program.getReferenceManager();
-            
             ReferenceIterator refIter = refManager.getReferencesTo(addr);
-            
+
             List<String> refs = new ArrayList<>();
             List<String> codeRefs = new ArrayList<>();
             while (refIter.hasNext()) {
                 Reference ref = refIter.next();
                 RefType refType = ref.getReferenceType();
+                if (!matchesRefTypeFilter(refType, refTypeFilter)) {
+                    continue;
+                }
                 if (codeOnly && !refType.isCall() && !refType.isFlow()) {
                     continue;
                 }
@@ -1295,12 +1307,21 @@ public class GhidraMCPPlugin extends Plugin {
                     refs.add(line);
                 }
             }
-            // Put call/flow refs first so MCP users see call sites at top
             codeRefs.addAll(refs);
             return paginateList(codeRefs, offset, limit);
         } catch (Exception e) {
             return "Error getting references to address: " + e.getMessage();
         }
+    }
+
+    /** Return true if refType matches refTypeFilter; refTypeFilter null/empty = match all. */
+    private boolean matchesRefTypeFilter(RefType refType, String refTypeFilter) {
+        if (refTypeFilter == null || refTypeFilter.isEmpty()) return true;
+        String r = refTypeFilter.toUpperCase();
+        if ("WRITE".equals(r)) return refType.isWrite();
+        if ("READ".equals(r)) return refType.isRead();
+        if ("DATA".equals(r)) return !refType.isCall() && !refType.isFlow();
+        return true;
     }
 
     /** Max addresses to scan in xrefs_to_range to avoid timeout. */
@@ -1309,8 +1330,9 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * Get all references to any address in [startAddr, endAddr]. Useful when a data block
      * (e.g. vtable) has no direct ref to the exact address but code may reference nearby.
+     * @param refTypeFilter optional "WRITE", "READ", or "DATA"; null/empty = all
      */
-    private String getXrefsToRange(String startStr, String endStr, int offset, int limit, boolean codeOnly) {
+    private String getXrefsToRange(String startStr, String endStr, int offset, int limit, boolean codeOnly, String refTypeFilter) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (startStr == null || startStr.isEmpty() || endStr == null || endStr.isEmpty()) {
@@ -1337,13 +1359,15 @@ public class GhidraMCPPlugin extends Plugin {
                 ReferenceIterator refIter = refManager.getReferencesTo(toAddr);
                 while (refIter.hasNext()) {
                     Reference ref = refIter.next();
-                    if (codeOnly && !ref.getReferenceType().isCall() && !ref.getReferenceType().isFlow()) continue;
+                    RefType refType = ref.getReferenceType();
+                    if (!matchesRefTypeFilter(refType, refTypeFilter)) continue;
+                    if (codeOnly && !refType.isCall() && !refType.isFlow()) continue;
                     Address fromAddr = ref.getFromAddress();
                     if (!seenFrom.add(fromAddr)) continue;
                     Function fromFunc = program.getFunctionManager().getFunctionContaining(fromAddr);
                     String funcInfo = (fromFunc != null) ? " in " + fromFunc.getName() : "";
-                    String line = String.format("From %s%s [%s] (to %s)", fromAddr, funcInfo, ref.getReferenceType().getName(), toAddr);
-                    if (ref.getReferenceType().isCall() || ref.getReferenceType().isFlow()) {
+                    String line = String.format("From %s%s [%s] (to %s)", fromAddr, funcInfo, refType.getName(), toAddr);
+                    if (refType.isCall() || refType.isFlow()) {
                         codeRefs.add(line);
                     } else {
                         dataRefs.add(line);
@@ -1354,6 +1378,43 @@ public class GhidraMCPPlugin extends Plugin {
             return paginateList(codeRefs, offset, limit);
         } catch (Exception e) {
             return "Error getting references to range: " + e.getMessage();
+        }
+    }
+
+    /**
+     * List functions that have at least one reference and zero code (call/flow) references.
+     * Useful to find vtable slot targets (functions only referenced from data).
+     */
+    private String getFunctionsWithDataOnlyXrefs(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        try {
+            FunctionManager funcManager = program.getFunctionManager();
+            ReferenceManager refManager = program.getReferenceManager();
+            List<String> result = new ArrayList<>();
+            for (Function func : funcManager.getFunctions(true)) {
+                boolean hasCodeRef = false;
+                boolean hasAnyRef = false;
+                java.util.Iterator<Address> bodyIt = func.getBody().getAddresses(true);
+                while (bodyIt.hasNext()) {
+                    ReferenceIterator refIter = refManager.getReferencesTo(bodyIt.next());
+                    while (refIter.hasNext()) {
+                        Reference ref = refIter.next();
+                        hasAnyRef = true;
+                        if (ref.getReferenceType().isCall() || ref.getReferenceType().isFlow()) {
+                            hasCodeRef = true;
+                            break;
+                        }
+                    }
+                    if (hasCodeRef) break;
+                }
+                if (hasAnyRef && !hasCodeRef) {
+                    result.add(String.format("%s at %s", func.getName(), func.getEntryPoint()));
+                }
+            }
+            return paginateList(result, offset, limit);
+        } catch (Exception e) {
+            return "Error listing functions with data-only xrefs: " + e.getMessage();
         }
     }
 

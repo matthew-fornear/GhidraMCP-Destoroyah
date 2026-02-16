@@ -229,7 +229,7 @@ def set_local_variable_type(function_address: str, variable_name: str, new_type:
     return safe_post("set_local_variable_type", {"function_address": function_address, "variable_name": variable_name, "new_type": new_type})
 
 @mcp.tool()
-def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, code_only: bool = False) -> list:
+def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, code_only: bool = False, ref_type: str = None) -> list:
     """
     Get all references to the specified address (xref to).
     
@@ -238,6 +238,7 @@ def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, code_only: boo
         offset: Pagination offset (default: 0)
         limit: Maximum number of references to return (default: 100)
         code_only: If True, return only call/flow refs (e.g. BL call sites); call refs are listed first
+        ref_type: Optional filter: "WRITE" (only write refs), "READ" (only read refs), "DATA" (only data refs, no call/flow). Omit for all.
         
     Returns:
         List of references to the specified address
@@ -245,10 +246,12 @@ def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, code_only: boo
     params = {"address": address, "offset": offset, "limit": limit}
     if code_only:
         params["code_only"] = "true"
+    if ref_type:
+        params["ref_type"] = ref_type
     return safe_get("xrefs_to", params)
 
 @mcp.tool()
-def get_xrefs_to_range(start_address: str, end_address: str, offset: int = 0, limit: int = 100, code_only: bool = False) -> list:
+def get_xrefs_to_range(start_address: str, end_address: str, offset: int = 0, limit: int = 100, code_only: bool = False, ref_type: str = None) -> list:
     """
     Get all references to any address in [start_address, end_address] (step 8 bytes).
     Use when a data block (e.g. vtable) has no direct xref to the exact address but
@@ -260,6 +263,7 @@ def get_xrefs_to_range(start_address: str, end_address: str, offset: int = 0, li
         offset: Pagination offset (default: 0)
         limit: Max refs to return (default: 100)
         code_only: If True, only call/flow refs
+        ref_type: Optional "WRITE", "READ", or "DATA" to filter by ref type
 
     Returns:
         List of "From <addr> in <func> [TYPE] (to <addr>)" lines
@@ -267,6 +271,8 @@ def get_xrefs_to_range(start_address: str, end_address: str, offset: int = 0, li
     params = {"start": start_address, "end": end_address, "offset": offset, "limit": limit}
     if code_only:
         params["code_only"] = "true"
+    if ref_type:
+        params["ref_type"] = ref_type
     return safe_get("xrefs_to_range", params)
 
 @mcp.tool()
@@ -302,6 +308,21 @@ def get_function_xrefs(name: str, offset: int = 0, limit: int = 100, code_only: 
     if code_only:
         params["code_only"] = "true"
     return safe_get("function_xrefs", params)
+
+@mcp.tool()
+def list_functions_data_only_xrefs(offset: int = 0, limit: int = 100) -> list:
+    """
+    List functions that have at least one reference and zero code (call/flow) references.
+    Use to find vtable slot targets or other functions only referenced from data.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Max entries to return (default: 100)
+
+    Returns:
+        List of "functionName at address" for functions with data-only xrefs
+    """
+    return safe_get("functions_data_only_xrefs", {"offset": offset, "limit": limit})
 
 @mcp.tool()
 def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list:
