@@ -321,6 +321,36 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
         params["filter"] = filter
     return safe_get("strings", params)
 
+@mcp.tool()
+def read_memory(address: str, length: int = 8) -> str:
+    """
+    Read raw bytes at address. Returns hex string (little-endian).
+    Use for vtables, pointers, or any fixed address (max 128 bytes).
+    """
+    if length <= 0 or length > 128:
+        length = 8
+    lines = safe_get("read_memory", {"address": address, "length": length})
+    if not lines or lines[0].startswith("Error"):
+        return lines[0] if lines else "Error: no response"
+    return lines[0]
+
+@mcp.tool()
+def get_pointer_at(address: str) -> str:
+    """
+    Read 8 bytes at address as a 64-bit pointer (little-endian). Returns hex address.
+    Use for vtable slots (e.g. vtable_base+0x100) to get handler function address.
+    """
+    hex_str = read_memory(address, 8)
+    if hex_str.startswith("Error"):
+        return hex_str
+    if len(hex_str) != 16:
+        return f"Error: expected 16 hex chars, got {len(hex_str)}"
+    try:
+        value = int.from_bytes(bytes.fromhex(hex_str), "little")
+        return f"0x{value:x}"
+    except (ValueError, TypeError):
+        return f"Error: invalid hex {hex_str}"
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,

@@ -1,3 +1,4 @@
+# GhidraMCP (this repo only; ios project has its own .gitignore at repo root)
 # Maven target directory
 /target/
 

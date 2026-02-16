@@ -6,6 +6,7 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.symbol.ReferenceManager;
@@ -352,6 +353,13 @@ public class GhidraMCPPlugin extends Plugin {
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
             String filter = qparams.get("filter");
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
+        });
+
+        server.createContext("/read_memory", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int length = parseIntOrDefault(qparams.get("length"), 8);
+            sendResponse(exchange, readMemory(address, length));
         });
 
         server.setExecutor(null);
@@ -1385,6 +1393,32 @@ public class GhidraMCPPlugin extends Plugin {
             return paginateList(refs, offset, limit);
         } catch (Exception e) {
             return "Error getting references from address: " + e.getMessage();
+        }
+    }
+
+    private static final int READ_MEMORY_MAX_BYTES = 128;
+
+    /**
+     * Read bytes at address. Returns hex string (e.g. for vtables / pointers).
+     */
+    private String readMemory(String addressStr, int length) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+        if (length <= 0 || length > READ_MEMORY_MAX_BYTES) length = 8;
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Memory memory = program.getMemory();
+            if (!memory.contains(addr)) return "Address not in memory";
+            byte[] buf = new byte[length];
+            int n = memory.getBytes(addr, buf);
+            StringBuilder sb = new StringBuilder(n * 2);
+            for (int i = 0; i < n; i++) {
+                sb.append(String.format("%02x", buf[i] & 0xff));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "Error reading memory: " + e.getMessage();
         }
     }
 

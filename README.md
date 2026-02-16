@@ -33,9 +33,14 @@
   Patch: Updated pom to Ghidra 12.0.3 and current plugin versions so the project builds against current tooling.
 
 - **Bridge (bridge_mcp_ghidra.py)**  
-  Before: No `code_only` on xref tools; no range xref tool; short fixed timeout for Ghidra HTTP.  
-  Why: Plugin patches above need to be exposed to MCP clients; large binaries need longer timeout.  
-  Patch: `get_xrefs_to` and `get_function_xrefs` accept `code_only` and pass it through. New tool `get_xrefs_to_range(start_address, end_address, ...)`. All requests use `GHIDRA_MCP_TIMEOUT` (default 600s). Disassembly comes from plugin as full listing; bridge passes it through (no truncation).
+  Before: No `code_only` on xref tools; no range xref tool; short fixed timeout for Ghidra HTTP; no way to read memory.  
+  Why: Plugin patches above need to be exposed to MCP clients; large binaries need longer timeout; vtable and data audit need reading pointers at an address.  
+  Patch: `get_xrefs_to` and `get_function_xrefs` accept `code_only` and pass it through. New tool `get_xrefs_to_range(start_address, end_address, ...)`. All requests use `GHIDRA_MCP_TIMEOUT` (default 600s). Disassembly comes from plugin as full listing; bridge passes it through. New tool `read_memory(address, length)` (hex bytes); `get_pointer_at(address)` (8-byte LE pointer) so vtables and data can be read without the UI.
+
+- **read_memory / get_pointer_at**  
+  Before: No way to read raw memory or a pointer at an address via MCP.  
+  Why: Resolving OOL vtable slots (+0x100, +0x108, +0x110) and checking data layout requires reading at an address.  
+  Patch: Plugin endpoint `/read_memory?address=&length=` (max 128 bytes, returns hex). Bridge tools `read_memory(address, length)` and `get_pointer_at(address)` (8 bytes, little-endian, returns hex address).
 
 ---
 
