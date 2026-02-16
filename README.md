@@ -1,119 +1,57 @@
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/releases)
-[![GitHub stars](https://img.shields.io/github/stars/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/network/members)
-[![GitHub contributors](https://img.shields.io/github/contributors/LaurieWired/GhidraMCP)](https://github.com/LaurieWired/GhidraMCP/graphs/contributors)
-[![Follow @lauriewired](https://img.shields.io/twitter/follow/lauriewired?style=social)](https://twitter.com/lauriewired)
+# GhidraMCP - Destoroyah Patch
 
-![ghidra_MCP_logo](https://github.com/user-attachments/assets/4986d702-be3f-4697-acce-aea55cd79ad3)
+**Patches**
 
+- **xrefs_to / function_xrefs**  
+  Before: No filter; all reference types returned in one list.  
+  Why: You need call sites only; mixing in data refs is noise.  
+  Patch: Added `code_only` param. When true, only call/flow refs are returned. When false, call/flow refs are listed first so call sites stay at the top.
 
-# ghidraMCP
-ghidraMCP is an Model Context Protocol server for allowing LLMs to autonomously reverse engineer applications. It exposes numerous tools from core Ghidra functionality to MCP clients.
+- **getFunctionXrefs**  
+  Before: Ref manager was queried only for the function’s entry address.  
+  Why: A BL to the first instruction of a function is a call but was missing.  
+  Patch: Refs are gathered for every address in the function body so BL-to-entry is included.
 
-https://github.com/user-attachments/assets/36080514-f227-44bd-af84-78e29ee1d7f9
+- **Disassembly**  
+  Before: Bridge returned disassembly as a list of lines; MCP clients often showed one line or truncated.  
+  Why: You need the full listing in the client.  
+  Patch: Bridge returns one newline-joined string so the full disassembly is shown.
 
+- **Timeout**  
+  Before: HTTP timeout was short (e.g. 5s); decompile and list_data on large binaries often timed out.  
+  Why: Large programs (e.g. kernel) need longer.  
+  Patch: Default timeout is 600s. Override with `GHIDRA_MCP_TIMEOUT` (seconds) in the environment.
 
-# Features
-MCP Server + Ghidra Plugin
+- **get_xrefs_to_range**  
+  Before: Only `get_xrefs_to(single address)`; no way to ask for refs to any address in a block.  
+  Why: Vtables and data blocks often have no ref to the exact stored address; code references somewhere in the block.  
+  Patch: New plugin endpoint and bridge tool `get_xrefs_to_range(start_address, end_address)`. Scans the range in 8-byte steps (up to a cap) and returns all refs to any address in that range.
 
-- Decompile and analyze binaries in Ghidra
-- Automatically rename methods and data
-- List methods, classes, imports, and exports
+- **pom.xml**  
+  Before: Upstream MCP pom was several versions behind (older Ghidra API version and outdated Maven plugin versions).  
+  Why: Build failed or did not match current Ghidra and Maven.  
+  Patch: Updated pom to Ghidra 12.0.3 and current plugin versions so the project builds against current tooling.
 
-# Installation
+- **Bridge (bridge_mcp_ghidra.py)**  
+  Before: No `code_only` on xref tools; no range xref tool; short fixed timeout for Ghidra HTTP.  
+  Why: Plugin patches above need to be exposed to MCP clients; large binaries need longer timeout.  
+  Patch: `get_xrefs_to` and `get_function_xrefs` accept `code_only` and pass it through. New tool `get_xrefs_to_range(start_address, end_address, ...)`. All requests use `GHIDRA_MCP_TIMEOUT` (default 600s). Disassembly comes from plugin as full listing; bridge passes it through (no truncation).
 
-## Prerequisites
-- Install [Ghidra](https://ghidra-sre.org)
-- Python3
-- MCP [SDK](https://github.com/modelcontextprotocol/python-sdk)
+---
 
-## Ghidra
-First, download the latest [release](https://github.com/LaurieWired/GhidraMCP/releases) from this repository. This contains the Ghidra plugin and Python MCP client. Then, you can directly import the plugin into Ghidra.
+GhidraMCP is an MCP server plus a Ghidra plugin. An MCP client (e.g. Cursor) can drive Ghidra: decompile, rename, list methods/classes/imports/exports, xrefs, and more.
 
-1. Run Ghidra
-2. Select `File` -> `Install Extensions`
-3. Click the `+` button
-4. Select the `GhidraMCP-1-2.zip` (or your chosen version) from the downloaded release
-5. Restart Ghidra
-6. Make sure the GhidraMCPPlugin is enabled in `File` -> `Configure` -> `Developer`
-7. *Optional*: Configure the port in Ghidra with `Edit` -> `Tool Options` -> `GhidraMCP HTTP Server`
+**Prerequisites:** Ghidra, Python 3.10+, and the MCP SDK. Install with `pip install mcp requests` or use the repo’s `requirements.txt`.
 
-Video Installation Guide:
+**Ghidra plugin**
+1. Copy Ghidra JARs into `lib/`. From your Ghidra install: `Base.jar`, `Decompiler.jar`, and from `Framework/*/lib/`: `Docking`, `Generic`, `Project`, `SoftwareModeling`, `Utility`, `Gui`.
+2. Build: `mvn clean package` then `mvn assembly:single` (or `mvn clean package assembly:single`). The zip is in `target/`.
+3. In Ghidra: File → Install Extensions → + → choose the zip from `target/` → restart. Turn the plugin on in File → Configure → Developer. To change the HTTP port: Edit → Tool Options → GhidraMCP HTTP Server.
 
+**Bridge (MCP server)**  
+Run `python bridge_mcp_ghidra.py`. It talks to Ghidra at `http://127.0.0.1:8080/` by default. To use another host or port, pass `--ghidra-server` or set it in your MCP config. To change how long the bridge waits for Ghidra, set `GHIDRA_MCP_TIMEOUT` in the environment (seconds; default 600).
 
-https://github.com/user-attachments/assets/75f0c176-6da1-48dc-ad96-c182eb4648c3
+**Cursor**  
+In MCP settings, set the command to `python` and the args to the path to `bridge_mcp_ghidra.py` and `--ghidra-server` and your Ghidra URL (e.g. `http://127.0.0.1:8080/`).
 
-
-
-## MCP Clients
-
-Theoretically, any MCP client should work with ghidraMCP.  Three examples are given below.
-
-## Example 1: Claude Desktop
-To set up Claude Desktop as a Ghidra MCP client, go to `Claude` -> `Settings` -> `Developer` -> `Edit Config` -> `claude_desktop_config.json` and add the following:
-
-```json
-{
-  "mcpServers": {
-    "ghidra": {
-      "command": "python",
-      "args": [
-        "/ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py",
-        "--ghidra-server",
-        "http://127.0.0.1:8080/"
-      ]
-    }
-  }
-}
-```
-
-Alternatively, edit this file directly:
-```
-/Users/YOUR_USER/Library/Application Support/Claude/claude_desktop_config.json
-```
-
-The server IP and port are configurable and should be set to point to the target Ghidra instance. If not set, both will default to localhost:8080.
-
-## Example 2: Cline
-To use GhidraMCP with [Cline](https://cline.bot), this requires manually running the MCP server as well. First run the following command:
-
-```
-python bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/
-```
-
-The only *required* argument is the transport. If all other arguments are unspecified, they will default to the above. Once the MCP server is running, open up Cline and select `MCP Servers` at the top.
-
-![Cline select](https://github.com/user-attachments/assets/88e1f336-4729-46ee-9b81-53271e9c0ce0)
-
-Then select `Remote Servers` and add the following, ensuring that the url matches the MCP host and port:
-
-1. Server Name: GhidraMCP
-2. Server URL: `http://127.0.0.1:8081/sse`
-
-## Example 3: 5ire
-Another MCP client that supports multiple models on the backend is [5ire](https://github.com/nanbingxyz/5ire). To set up GhidraMCP, open 5ire and go to `Tools` -> `New` and set the following configurations:
-
-1. Tool Key: ghidra
-2. Name: GhidraMCP
-3. Command: `python /ABSOLUTE_PATH_TO/bridge_mcp_ghidra.py`
-
-# Building from Source
-1. Copy the following files from your Ghidra directory to this project's `lib/` directory:
-- `Ghidra/Features/Base/lib/Base.jar`
-- `Ghidra/Features/Decompiler/lib/Decompiler.jar`
-- `Ghidra/Framework/Docking/lib/Docking.jar`
-- `Ghidra/Framework/Generic/lib/Generic.jar`
-- `Ghidra/Framework/Project/lib/Project.jar`
-- `Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling.jar`
-- `Ghidra/Framework/Utility/lib/Utility.jar`
-- `Ghidra/Framework/Gui/lib/Gui.jar`
-2. Build with Maven by running:
-
-`mvn clean package assembly:single`
-
-The generated zip file includes the built Ghidra plugin and its resources. These files are required for Ghidra to recognize the new extension.
-
-- lib/GhidraMCP.jar
-- extensions.properties
-- Module.manifest
+**Build from source:** Java 11+ and Maven. The JARs in `lib/` are not in the repo; copy them from your Ghidra install as above.

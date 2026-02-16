@@ -3,6 +3,7 @@ package com.lauriewired;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSpace;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.mem.MemoryBlock;
@@ -314,7 +315,18 @@ public class GhidraMCPPlugin extends Plugin {
             String address = qparams.get("address");
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
-            sendResponse(exchange, getXrefsTo(address, offset, limit));
+            boolean codeOnly = "true".equalsIgnoreCase(qparams.get("code_only"));
+            sendResponse(exchange, getXrefsTo(address, offset, limit, codeOnly));
+        });
+
+        server.createContext("/xrefs_to_range", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String startAddr = qparams.get("start");
+            String endAddr = qparams.get("end");
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            boolean codeOnly = "true".equalsIgnoreCase(qparams.get("code_only"));
+            sendResponse(exchange, getXrefsToRange(startAddr, endAddr, offset, limit, codeOnly));
         });
 
         server.createContext("/xrefs_from", exchange -> {
@@ -330,7 +342,8 @@ public class GhidraMCPPlugin extends Plugin {
             String name = qparams.get("name");
             int offset = parseIntOrDefault(qparams.get("offset"), 0);
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
-            sendResponse(exchange, getFunctionXrefs(name, offset, limit));
+            boolean codeOnly = "true".equalsIgnoreCase(qparams.get("code_only"));
+            sendResponse(exchange, getFunctionXrefs(name, offset, limit, codeOnly));
         });
 
         server.createContext("/strings", exchange -> {
@@ -817,7 +830,8 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * Get assembly code for a function
+     * Get full assembly listing for the function containing the given address.
+     * Returns every instruction in the function body (address: mnemonic; comment) for audit use.
      */
     private String disassembleFunction(String addressStr) {
         Program program = getCurrentProgram();
@@ -831,23 +845,21 @@ public class GhidraMCPPlugin extends Plugin {
 
             StringBuilder result = new StringBuilder();
             Listing listing = program.getListing();
-            Address start = func.getEntryPoint();
-            Address end = func.getBody().getMaxAddress();
-
-            InstructionIterator instructions = listing.getInstructions(start, true);
-            while (instructions.hasNext()) {
-                Instruction instr = instructions.next();
-                if (instr.getAddress().compareTo(end) > 0) {
-                    break; // Stop if we've gone past the end of the function
+            // Walk addresses in function body; emit only at instruction start to get full listing once per instruction
+            java.util.Iterator<Address> addrIt = func.getBody().getAddresses(true);
+            int count = 0;
+            while (addrIt.hasNext()) {
+                Address a = addrIt.next();
+                Instruction instr = listing.getInstructionAt(a);
+                if (instr != null && instr.getMinAddress().equals(a)) {
+                    count++;
+                    String comment = listing.getComment(CodeUnit.EOL_COMMENT, a);
+                    comment = (comment != null) ? "; " + comment : "";
+                    result.append(String.format("%s: %s %s\n", a, instr.toString(), comment));
                 }
-                String comment = listing.getComment(CodeUnit.EOL_COMMENT, instr.getAddress());
-                comment = (comment != null) ? "; " + comment : "";
-
-                result.append(String.format("%s: %s %s\n", 
-                    instr.getAddress(), 
-                    instr.toString(),
-                    comment));
             }
+            // Prepend count so we can verify full listing is returned (vs truncated)
+            result.insert(0, "[disasm count=" + count + "]\n");
 
             return result.toString();
         } catch (Exception e) {
@@ -1243,9 +1255,10 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * Get all references to a specific address (xref to)
+     * Get all references to a specific address (xref to).
+     * @param codeOnly when true, only return references that are calls or flow (e.g. BL call sites)
      */
-    private String getXrefsTo(String addressStr, int offset, int limit) {
+    private String getXrefsTo(String addressStr, int offset, int limit, boolean codeOnly) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (addressStr == null || addressStr.isEmpty()) return "Address is required";
@@ -1257,20 +1270,82 @@ public class GhidraMCPPlugin extends Plugin {
             ReferenceIterator refIter = refManager.getReferencesTo(addr);
             
             List<String> refs = new ArrayList<>();
+            List<String> codeRefs = new ArrayList<>();
             while (refIter.hasNext()) {
                 Reference ref = refIter.next();
-                Address fromAddr = ref.getFromAddress();
                 RefType refType = ref.getReferenceType();
-                
+                if (codeOnly && !refType.isCall() && !refType.isFlow()) {
+                    continue;
+                }
+                Address fromAddr = ref.getFromAddress();
                 Function fromFunc = program.getFunctionManager().getFunctionContaining(fromAddr);
                 String funcInfo = (fromFunc != null) ? " in " + fromFunc.getName() : "";
-                
-                refs.add(String.format("From %s%s [%s]", fromAddr, funcInfo, refType.getName()));
+                String line = String.format("From %s%s [%s]", fromAddr, funcInfo, refType.getName());
+                if (refType.isCall() || refType.isFlow()) {
+                    codeRefs.add(line);
+                } else {
+                    refs.add(line);
+                }
             }
-            
-            return paginateList(refs, offset, limit);
+            // Put call/flow refs first so MCP users see call sites at top
+            codeRefs.addAll(refs);
+            return paginateList(codeRefs, offset, limit);
         } catch (Exception e) {
             return "Error getting references to address: " + e.getMessage();
+        }
+    }
+
+    /** Max addresses to scan in xrefs_to_range to avoid timeout. */
+    private static final int XREFS_TO_RANGE_MAX_ADDRESSES = 512;
+
+    /**
+     * Get all references to any address in [startAddr, endAddr]. Useful when a data block
+     * (e.g. vtable) has no direct ref to the exact address but code may reference nearby.
+     */
+    private String getXrefsToRange(String startStr, String endStr, int offset, int limit, boolean codeOnly) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (startStr == null || startStr.isEmpty() || endStr == null || endStr.isEmpty()) {
+            return "start and end address are required";
+        }
+        try {
+            Address startAddr = program.getAddressFactory().getAddress(startStr);
+            Address endAddr = program.getAddressFactory().getAddress(endStr);
+            if (startAddr == null || endAddr == null || !startAddr.getAddressSpace().equals(endAddr.getAddressSpace())) {
+                return "Invalid address range";
+            }
+            long startOff = startAddr.getOffset();
+            long endOff = endAddr.getOffset();
+            if (startOff > endOff) return "Start must be <= end";
+            AddressSpace space = startAddr.getAddressSpace();
+            ReferenceManager refManager = program.getReferenceManager();
+            List<String> codeRefs = new ArrayList<>();
+            List<String> dataRefs = new ArrayList<>();
+            java.util.Set<Address> seenFrom = new java.util.HashSet<>();
+            int addressesScanned = 0;
+            for (long off = startOff; off <= endOff && addressesScanned < XREFS_TO_RANGE_MAX_ADDRESSES; off += 8) {
+                addressesScanned++;
+                Address toAddr = space.getAddress(off);
+                ReferenceIterator refIter = refManager.getReferencesTo(toAddr);
+                while (refIter.hasNext()) {
+                    Reference ref = refIter.next();
+                    if (codeOnly && !ref.getReferenceType().isCall() && !ref.getReferenceType().isFlow()) continue;
+                    Address fromAddr = ref.getFromAddress();
+                    if (!seenFrom.add(fromAddr)) continue;
+                    Function fromFunc = program.getFunctionManager().getFunctionContaining(fromAddr);
+                    String funcInfo = (fromFunc != null) ? " in " + fromFunc.getName() : "";
+                    String line = String.format("From %s%s [%s] (to %s)", fromAddr, funcInfo, ref.getReferenceType().getName(), toAddr);
+                    if (ref.getReferenceType().isCall() || ref.getReferenceType().isFlow()) {
+                        codeRefs.add(line);
+                    } else {
+                        dataRefs.add(line);
+                    }
+                }
+            }
+            codeRefs.addAll(dataRefs);
+            return paginateList(codeRefs, offset, limit);
+        } catch (Exception e) {
+            return "Error getting references to range: " + e.getMessage();
         }
     }
 
@@ -1314,39 +1389,57 @@ public class GhidraMCPPlugin extends Plugin {
     }
 
     /**
-     * Get all references to a specific function by name
+     * Get all references to a specific function by name.
+     * Gathers refs to the entire function body (not just entry) so call sites (BL to first insn) are included.
+     * @param codeOnly when true, only return references that are calls or flow (call sites)
      */
-    private String getFunctionXrefs(String functionName, int offset, int limit) {
+    private String getFunctionXrefs(String functionName, int offset, int limit, boolean codeOnly) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (functionName == null || functionName.isEmpty()) return "Function name is required";
 
         try {
             List<String> refs = new ArrayList<>();
+            List<String> codeRefs = new ArrayList<>();
             FunctionManager funcManager = program.getFunctionManager();
+            ReferenceManager refManager = program.getReferenceManager();
             for (Function function : funcManager.getFunctions(true)) {
-                if (function.getName().equals(functionName)) {
-                    Address entryPoint = function.getEntryPoint();
-                    ReferenceIterator refIter = program.getReferenceManager().getReferencesTo(entryPoint);
-                    
+                if (!function.getName().equals(functionName)) {
+                    continue;
+                }
+                // Collect refs to every address in the function body so we include BL call sites
+                java.util.Iterator<Address> bodyIt = function.getBody().getAddresses(true);
+                Set<Address> seenFrom = new HashSet<>();
+                while (bodyIt.hasNext()) {
+                    Address toAddr = bodyIt.next();
+                    ReferenceIterator refIter = refManager.getReferencesTo(toAddr);
                     while (refIter.hasNext()) {
                         Reference ref = refIter.next();
                         Address fromAddr = ref.getFromAddress();
+                        if (!seenFrom.add(fromAddr)) {
+                            continue; // one line per call site
+                        }
                         RefType refType = ref.getReferenceType();
-                        
+                        if (codeOnly && !refType.isCall() && !refType.isFlow()) {
+                            continue;
+                        }
                         Function fromFunc = funcManager.getFunctionContaining(fromAddr);
                         String funcInfo = (fromFunc != null) ? " in " + fromFunc.getName() : "";
-                        
-                        refs.add(String.format("From %s%s [%s]", fromAddr, funcInfo, refType.getName()));
+                        String line = String.format("From %s%s [%s]", fromAddr, funcInfo, refType.getName());
+                        if (refType.isCall() || refType.isFlow()) {
+                            codeRefs.add(line);
+                        } else {
+                            refs.add(line);
+                        }
                     }
                 }
+                break; // one function matched
             }
-            
-            if (refs.isEmpty()) {
+            if (codeRefs.isEmpty() && refs.isEmpty()) {
                 return "No references found to function: " + functionName;
             }
-            
-            return paginateList(refs, offset, limit);
+            codeRefs.addAll(refs);
+            return paginateList(codeRefs, offset, limit);
         } catch (Exception e) {
             return "Error getting function references: " + e.getMessage();
         }

@@ -6,6 +6,7 @@
 # ]
 # ///
 
+import os
 import sys
 import requests
 import argparse
@@ -15,6 +16,9 @@ from urllib.parse import urljoin
 from mcp.server.fastmcp import FastMCP
 
 DEFAULT_GHIDRA_SERVER = "http://127.0.0.1:8080/"
+
+# Timeout for Ghidra HTTP requests (seconds). Decompile/list_data on large programs can take 30s+.
+GHIDRA_REQUEST_TIMEOUT = int(os.environ.get("GHIDRA_MCP_TIMEOUT", "600"))
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ def safe_get(endpoint: str, params: dict = None) -> list:
     url = urljoin(ghidra_server_url, endpoint)
 
     try:
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(url, params=params, timeout=GHIDRA_REQUEST_TIMEOUT)
         response.encoding = 'utf-8'
         if response.ok:
             return response.text.splitlines()
@@ -46,9 +50,9 @@ def safe_post(endpoint: str, data: dict | str) -> str:
     try:
         url = urljoin(ghidra_server_url, endpoint)
         if isinstance(data, dict):
-            response = requests.post(url, data=data, timeout=5)
+            response = requests.post(url, data=data, timeout=GHIDRA_REQUEST_TIMEOUT)
         else:
-            response = requests.post(url, data=data.encode("utf-8"), timeout=5)
+            response = requests.post(url, data=data.encode("utf-8"), timeout=GHIDRA_REQUEST_TIMEOUT)
         response.encoding = 'utf-8'
         if response.ok:
             return response.text.strip()
@@ -225,7 +229,7 @@ def set_local_variable_type(function_address: str, variable_name: str, new_type:
     return safe_post("set_local_variable_type", {"function_address": function_address, "variable_name": variable_name, "new_type": new_type})
 
 @mcp.tool()
-def get_xrefs_to(address: str, offset: int = 0, limit: int = 100) -> list:
+def get_xrefs_to(address: str, offset: int = 0, limit: int = 100, code_only: bool = False) -> list:
     """
     Get all references to the specified address (xref to).
     
@@ -233,11 +237,37 @@ def get_xrefs_to(address: str, offset: int = 0, limit: int = 100) -> list:
         address: Target address in hex format (e.g. "0x1400010a0")
         offset: Pagination offset (default: 0)
         limit: Maximum number of references to return (default: 100)
+        code_only: If True, return only call/flow refs (e.g. BL call sites); call refs are listed first
         
     Returns:
         List of references to the specified address
     """
-    return safe_get("xrefs_to", {"address": address, "offset": offset, "limit": limit})
+    params = {"address": address, "offset": offset, "limit": limit}
+    if code_only:
+        params["code_only"] = "true"
+    return safe_get("xrefs_to", params)
+
+@mcp.tool()
+def get_xrefs_to_range(start_address: str, end_address: str, offset: int = 0, limit: int = 100, code_only: bool = False) -> list:
+    """
+    Get all references to any address in [start_address, end_address] (step 8 bytes).
+    Use when a data block (e.g. vtable) has no direct xref to the exact address but
+    code may reference somewhere in the range.
+
+    Args:
+        start_address: Start of range in hex (e.g. "0xfffffe000b6e8f00")
+        end_address: End of range in hex (e.g. "0xfffffe000b6e8f40")
+        offset: Pagination offset (default: 0)
+        limit: Max refs to return (default: 100)
+        code_only: If True, only call/flow refs
+
+    Returns:
+        List of "From <addr> in <func> [TYPE] (to <addr>)" lines
+    """
+    params = {"start": start_address, "end": end_address, "offset": offset, "limit": limit}
+    if code_only:
+        params["code_only"] = "true"
+    return safe_get("xrefs_to_range", params)
 
 @mcp.tool()
 def get_xrefs_from(address: str, offset: int = 0, limit: int = 100) -> list:
@@ -255,19 +285,23 @@ def get_xrefs_from(address: str, offset: int = 0, limit: int = 100) -> list:
     return safe_get("xrefs_from", {"address": address, "offset": offset, "limit": limit})
 
 @mcp.tool()
-def get_function_xrefs(name: str, offset: int = 0, limit: int = 100) -> list:
+def get_function_xrefs(name: str, offset: int = 0, limit: int = 100, code_only: bool = False) -> list:
     """
-    Get all references to the specified function by name.
+    Get all references to the specified function by name (includes refs to entire function body).
     
     Args:
         name: Function name to search for
         offset: Pagination offset (default: 0)
         limit: Maximum number of references to return (default: 100)
+        code_only: If True, return only call/flow refs (call sites); call refs are listed first
         
     Returns:
         List of references to the specified function
     """
-    return safe_get("function_xrefs", {"name": name, "offset": offset, "limit": limit})
+    params = {"name": name, "offset": offset, "limit": limit}
+    if code_only:
+        params["code_only"] = "true"
+    return safe_get("function_xrefs", params)
 
 @mcp.tool()
 def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list:
@@ -335,4 +369,3 @@ def main():
         
 if __name__ == "__main__":
     main()
-
